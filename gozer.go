@@ -32,8 +32,9 @@ type Site struct {
 	Pages []Page
 	Posts []Page
 
-	Title   string `toml:"title"`
-	SiteUrl string `toml:"url"`
+	Title   string         `toml:"title"`
+	SiteUrl string         `toml:"url"`
+	Data    map[string]any `toml:"data"`
 	RootDir string
 
 	Meta map[string]any `toml:"-"`
@@ -68,6 +69,12 @@ type Page struct {
 
 	// Deprecated: use Meta.
 	Attrs map[string]any `toml:"-"`
+
+	// A list of tags associated with the page
+	Tags []string `toml:"tags"`
+
+	// Arbitrary page data available to templates
+	Data map[string]any `toml:"data"`
 }
 
 // parseFilename parses the URL path and optional date component from the given file path
@@ -133,18 +140,31 @@ func parseFrontMatter(p *Page) error {
 	return nil
 }
 
+func stripFrontMatter(fileContent []byte) []byte {
+	if len(fileContent) > 6 {
+		pos := bytes.Index(fileContent[3:], frontMatter)
+		if pos > -1 {
+			return fileContent[pos+6:]
+		}
+	}
+	return fileContent
+}
+
 func (p *Page) ParseContent() (string, error) {
+	return (&Site{}).parsePageContent(p, template.HTML(""))
+}
+
+func (s *Site) parsePageContent(p *Page, currentContent template.HTML) (string, error) {
 	fileContent, err := os.ReadFile(p.Filepath)
 	if err != nil {
 		return "", err
 	}
 
-	// Skip front matter
-	if len(fileContent) > 6 {
-		pos := bytes.Index(fileContent[3:], frontMatter)
-		if pos > -1 {
-			fileContent = fileContent[pos+6:]
-		}
+	fileContent = stripFrontMatter(fileContent)
+
+	body, err := s.renderContentTemplate(p, fileContent, currentContent)
+	if err != nil {
+		return "", err
 	}
 
 	switch filepath.Ext(p.Filepath) {
@@ -153,21 +173,86 @@ func (p *Page) ParseContent() (string, error) {
 	case ".md":
 		var buf2 strings.Builder
 		fmt.Printf("processing %q\n", p.Filepath)
-		if err := md.Convert(fileContent, &buf2); err != nil {
+		if err := md.Convert([]byte(body), &buf2); err != nil {
 			return "", err
 		}
 		return buf2.String(), nil
 	case ".dj":
-		return ConvertDjot(fileContent), nil
+		content, err := ConvertDjot([]byte(body))
+		if err != nil {
+			return "", fmt.Errorf("processing djot file %s: %w", p.Filepath, err)
+		}
+		return content, nil
 	case ".html":
-		return string(fileContent), nil
+		return body, nil
 	}
 	return "", fmt.Errorf("unexpected error")
 
 }
 
+func (s *Site) renderContentTemplate(p *Page, fileContent []byte, currentContent template.HTML) (string, error) {
+	tmpl, err := template.New(filepath.Base(p.Filepath)).Funcs(templateFuncs()).Parse(string(fileContent))
+	if err != nil {
+		return "", fmt.Errorf("parsing content template %s: %w", p.Filepath, err)
+	}
+
+	var content strings.Builder
+	if err := tmpl.Execute(&content, s.templateData(p, currentContent)); err != nil {
+		return "", fmt.Errorf("executing content template %s: %w", p.Filepath, err)
+	}
+	return content.String(), nil
+}
+
+func (s *Site) adjacentPosts(p *Page) (*Page, *Page) {
+	for i := range s.Posts {
+		if s.Posts[i].Filepath == p.Filepath {
+			var prev, next *Page
+			if i > 0 {
+				prev = &s.Posts[i-1]
+			}
+			if i < len(s.Posts)-1 {
+				next = &s.Posts[i+1]
+			}
+			return prev, next
+		}
+	}
+	return nil, nil
+}
+
+func (s *Site) templateData(p *Page, content template.HTML) map[string]any {
+	prev, next := s.adjacentPosts(p)
+
+	return map[string]any{
+		"Page":  p,
+		"Posts": s.Posts,
+		"Pages": s.Pages,
+		"Site": map[string]any{
+			"Url":   s.SiteUrl,
+			"Title": s.Title,
+			"Data":  s.Data,
+		},
+		"Meta":  s.Meta,
+		"Attrs": s.Meta,
+
+		// If the page is a post, it may have a next and previous post
+		// These may also be nil
+		"Prev": prev,
+		"Next": next,
+
+		// Shorthand for accessing through .Page.Title / .Page.Content
+		"Title":   p.Title,
+		"Content": content,
+
+		// Timestamp of build
+		"Now": now,
+
+		// Deprecated template variables, use .Site.Url instead
+		"SiteUrl": s.SiteUrl,
+	}
+}
+
 func (s *Site) buildPage(p *Page) error {
-	content, err := p.ParseContent()
+	content, err := s.parsePageContent(p, template.HTML(""))
 	if err != nil {
 		return err
 	}
@@ -188,44 +273,7 @@ func (s *Site) buildPage(p *Page) error {
 		return fmt.Errorf("invalid template name: %s", p.Template)
 	}
 
-	var prev, next *Page
-	for i, post := range s.Posts {
-		if &post == p {
-			if i > 0 {
-				prev = &s.Posts[i-1]
-			}
-			if i < len(s.Posts)-1 {
-				next = &s.Posts[i+1]
-			}
-		}
-	}
-
-	return tmpl.Execute(fh, map[string]any{
-		"Page":  p,
-		"Posts": s.Posts,
-		"Pages": s.Pages,
-		"Site": map[string]string{
-			"Url":   s.SiteUrl,
-			"Title": s.Title,
-		},
-		"Meta":  s.Meta,
-		"Attrs": s.Meta,
-
-		// If the page is a post, it may have a next and previous post
-		// These may also be nil
-		"Prev": prev,
-		"Next": next,
-
-		// Shorthand for accessing through .Page.Title / .Page.Content
-		"Title":   p.Title,
-		"Content": template.HTML(content),
-
-		// Timestamp of build
-		"Now": now,
-
-		// Deprecated template variables, use .Site.Url instead
-		"SiteUrl": s.SiteUrl,
-	})
+	return tmpl.Execute(fh, s.templateData(p, template.HTML(content)))
 }
 
 func (s *Site) AddPageFromFile(file string) error {
@@ -364,7 +412,7 @@ func (s *Site) createRSSFeed() error {
 
 	items := make([]Item, 0, n)
 	for _, p := range s.Posts[0:n] {
-		pageContent, err := p.ParseContent()
+		pageContent, err := s.parsePageContent(&p, template.HTML(""))
 		if err != nil {
 			log.Warn("error parsing content of %s: %s", p.Filepath, err)
 			continue
@@ -553,11 +601,8 @@ type PageGroup struct {
 	Pages []Page
 }
 
-func buildSite(rootPath string, configFile string) {
-	var err error
-	timeStart := time.Now()
-
-	temp := template.New("gozer").Funcs(template.FuncMap{
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
 		"HasPrefix": strings.HasPrefix,
 		"HasSuffix": strings.HasSuffix,
 		"Contains":  strings.Contains,
@@ -589,7 +634,14 @@ func buildSite(rootPath string, configFile string) {
 			}
 			return rv
 		},
-	})
+	}
+}
+
+func buildSite(rootPath string, configFile string) {
+	var err error
+	timeStart := time.Now()
+
+	temp := template.New("gozer").Funcs(templateFuncs())
 	templates, err = temp.ParseGlob(filepath.Join(rootPath, "templates/*.html"))
 	if err != nil {
 		log.Fatal("Error reading templates/ directory: %s", err)

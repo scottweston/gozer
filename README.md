@@ -91,14 +91,16 @@ Page content here.
 
 Templates are powered by Go's standard `html/template` package, so you can use all the [actions described here](https://pkg.go.dev/text/template#hdr-Actions).
 
+Content files are also evaluated as templates before Markdown or Djot conversion, using the same variables and template functions. During content-file template evaluation, `Content` is available but empty to avoid recursive rendering.
+
 Every template receives the following set of variables:
 
 ```
 Pages       # Slice of all pages in the site
 Posts       # Slice of all posts in the site (any page with a date in the filename)
-Site        # Global site properties: Url, Title
+Site        # Global site properties: Url, Title, Data
 Meta        # All keys from config.toml (for example: title, url, custom fields)
-Page        # The current page: Title, Permalink, UrlPath, DatePublished, DateModified, Meta
+Page        # The current page: Title, Permalink, UrlPath, DatePublished, DateModified, Meta, Data
 Title       # The current page title, shorthand for Page.Title
 Content     # The current page's HTML content.
 Now         # Timestamp of build, instance of time.Time
@@ -111,6 +113,24 @@ Now         # Timestamp of build, instance of time.Time
 
 {{ if index .Page.Meta "draft" }}
     <p>This page is still a draft.</p>
+{{ end }}
+```
+
+Arbitrary data can be defined under the `data` namespace in `config.toml` and page front matter. Global data is available as `.Site.Data`, and page-specific data is available as `.Page.Data`.
+
+```toml
+[[data.foobar]]
+name = "namey mcnamster"
+url = "https://example.com/namey"
+
+[[data.foobar]]
+name = "boaty mcboatface"
+url = "https://example.com/boaty"
+```
+
+```gotemplate
+{{ range .Site.Data.foobar }}
+    <a href="{{ .url }}">{{ .name }}</a>
 {{ end }}
 ```
 
@@ -144,6 +164,9 @@ type Page struct {
 
     // Deprecated: use Meta.
     Attrs         map[string]any
+
+    // Arbitrary page data from front matter
+    Data          map[string]any
 }
 ```
 

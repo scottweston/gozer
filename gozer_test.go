@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"html/template"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,6 +75,44 @@ func TestParseConfigFile(t *testing.T) {
 	if s.Title != expectedTitle {
 		t.Errorf("invalid site title. expected %v, got %v", expectedTitle, s.Title)
 	}
+
+	if s.Data != nil {
+		t.Errorf("expected optional config data to be nil, got %v", s.Data)
+	}
+}
+
+func TestParseConfigFileData(t *testing.T) {
+	file := t.TempDir() + "/config.toml"
+	err := os.WriteFile(file, []byte(`url = "https://example.com"
+title = "My website"
+
+[[data.foobar]]
+name = "namey mcnamster"
+url = "https://example.com/namey"
+
+[[data.foobar]]
+name = "boaty mcboatface"
+url = "https://example.com/boaty"
+`), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := Site{}
+	if err := parseConfig(&s, file); err != nil {
+		t.Errorf("error parsing config file: %s", err)
+	}
+
+	links := dataList(t, s.Data, "foobar")
+	if len(links) != 2 {
+		t.Fatalf("expected 2 links, got %d", len(links))
+	}
+	if links[0]["name"] != "namey mcnamster" || links[0]["url"] != "https://example.com/namey" {
+		t.Errorf("invalid first link: %v", links[0])
+	}
+	if links[1]["name"] != "boaty mcboatface" || links[1]["url"] != "https://example.com/boaty" {
+		t.Errorf("invalid second link: %v", links[1])
+	}
 }
 
 func TestParseConfigMetaAndAttrsAlias(t *testing.T) {
@@ -132,6 +172,42 @@ func TestParseFrontMatter(t *testing.T) {
 
 	if got := p.Attrs["title"]; got != expectedTitle {
 		t.Errorf("Invalid front matter title alias attr. Expected %v, got %v", expectedTitle, got)
+	}
+
+	if p.Data != nil {
+		t.Errorf("expected optional page data to be nil, got %v", p.Data)
+	}
+}
+
+func TestParseFrontMatterData(t *testing.T) {
+	file := t.TempDir() + "/page.md"
+	err := os.WriteFile(file, []byte(`+++
+title = "My data page"
+
+[[data.links]]
+name = "Example"
+url = "https://example.com"
++++
+
+Page content here.
+`), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Page{
+		Filepath: file,
+	}
+	if err := parseFrontMatter(p); err != nil {
+		t.Fatal(err)
+	}
+
+	links := dataList(t, p.Data, "links")
+	if len(links) != 1 {
+		t.Fatalf("expected 1 link, got %d", len(links))
+	}
+	if links[0]["name"] != "Example" || links[0]["url"] != "https://example.com" {
+		t.Errorf("invalid link: %v", links[0])
 	}
 }
 
@@ -212,6 +288,207 @@ func TestParseContentDjot(t *testing.T) {
 	}
 }
 
+func TestConvertDjot(t *testing.T) {
+	content, err := ConvertDjot([]byte("Hey, welcome on my site!"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if content != "<p>Hey, welcome on my site!</p>\n" {
+		t.Errorf("Invalid content. Got %v", content)
+	}
+}
+
+func TestTemplateData(t *testing.T) {
+	oldTemplates := templates
+	defer func() {
+		templates = oldTemplates
+		_ = os.RemoveAll("build/data-test")
+	}()
+
+	var err error
+	templates, err = template.New("gozer").Parse(`{{ define "default.html" }}{{ range .Site.Data.foobar }}{{ .name }}={{ .url }};{{ end }}|{{ range .Page.Data.links }}{{ .name }}={{ .url }};{{ end }}{{ end }}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	file := t.TempDir() + "/page.html"
+	if err := os.WriteFile(file, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := Site{
+		SiteUrl: "https://example.com/",
+		Title:   "My website",
+		Data: map[string]any{
+			"foobar": []map[string]any{{
+				"name": "global",
+				"url":  "https://example.com/global",
+			}},
+		},
+	}
+	p := &Page{
+		Filepath:  file,
+		UrlPath:   "data-test/",
+		Template:  "default.html",
+		Permalink: "https://example.com/data-test/",
+		Data: map[string]any{
+			"links": []map[string]any{{
+				"name": "page",
+				"url":  "https://example.com/page",
+			}},
+		},
+	}
+
+	if err := s.buildPage(p); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile("build/data-test/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := []byte("global=https://example.com/global;|page=https://example.com/page;")
+	if !bytes.Contains(content, expected) {
+		t.Errorf("expected template data output %q, got %q", expected, content)
+	}
+}
+
+func TestContentTemplateDataBeforeMarkdownConversion(t *testing.T) {
+	oldNow := now
+	now = time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	defer func() {
+		now = oldNow
+	}()
+
+	file := t.TempDir() + "/page.md"
+	if err := os.WriteFile(file, []byte(`+++
+title = "Content template page"
++++
+
+Site: {{ .Site.Url }} {{ .Site.Title }} {{ range .Site.Data.links }}{{ .name }}{{ end }}
+Page: {{ .Page.Title }} {{ .Page.Permalink }} {{ range .Page.Data.links }}{{ .name }}{{ end }}
+Counts: {{ len .Posts }} {{ len .Pages }}
+Now: {{ .Now.Year }}
+Legacy: {{ .SiteUrl }}
+{{ "**rendered markdown**" }}
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Page{
+		Filepath:  file,
+		Title:     "Content template page",
+		Permalink: "https://example.com/page/",
+		Data: map[string]any{
+			"links": []map[string]any{{"name": "page-link"}},
+		},
+	}
+	s := Site{
+		SiteUrl: "https://example.com/",
+		Title:   "Example site",
+		Pages:   []Page{p, {Title: "Other page"}},
+		Posts:   []Page{p},
+		Data: map[string]any{
+			"links": []map[string]any{{"name": "site-link"}},
+		},
+	}
+
+	content, err := s.parsePageContent(&p, template.HTML(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := []string{
+		`Site: <a href="https://example.com/">https://example.com/</a> Example site site-link`,
+		`Page: Content template page <a href="https://example.com/page/">https://example.com/page/</a> page-link`,
+		"Counts: 1 2",
+		"Now: 2026",
+		`Legacy: <a href="https://example.com/">https://example.com/</a>`,
+		"<strong>rendered markdown</strong>",
+	}
+	for _, e := range expected {
+		if !strings.Contains(content, e) {
+			t.Errorf("expected content template output %q in %q", e, content)
+		}
+	}
+}
+
+func TestContentTemplateContentVariableIsEmpty(t *testing.T) {
+	file := t.TempDir() + "/page.md"
+	if err := os.WriteFile(file, []byte(`{{ if .Content }}has content{{ else }}empty content{{ end }}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Page{Filepath: file}
+	content, err := (&Site{}).parsePageContent(&p, template.HTML(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(content, "<p>empty content</p>") {
+		t.Errorf("expected empty content marker, got %q", content)
+	}
+}
+
+func TestContentTemplateHTML(t *testing.T) {
+	file := t.TempDir() + "/page.html"
+	if err := os.WriteFile(file, []byte(`<h1>{{ .Title }}</h1>`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Page{
+		Filepath: file,
+		Title:    "HTML template page",
+	}
+	content, err := (&Site{}).parsePageContent(&p, template.HTML(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if content != "<h1>HTML template page</h1>" {
+		t.Errorf("expected rendered HTML content, got %q", content)
+	}
+}
+
+func TestContentTemplateSyntaxError(t *testing.T) {
+	file := t.TempDir() + "/page.md"
+	if err := os.WriteFile(file, []byte(`{{ if .Title }}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Page{Filepath: file}
+	_, err := (&Site{}).parsePageContent(&p, template.HTML(""))
+	if err == nil {
+		t.Fatal("expected content template syntax error")
+	}
+	if !strings.Contains(err.Error(), "parsing content template "+file) {
+		t.Errorf("expected filepath in content template error, got %q", err)
+	}
+}
+
+func TestFirstFailingLine(t *testing.T) {
+	content := []byte("line 1\nline 2\nline 3\n")
+	line := firstFailingLine(content, func(prefix []byte) bool {
+		return strings.Contains(string(prefix), "line 2")
+	})
+
+	if line != 2 {
+		t.Errorf("expected line 2, got %d", line)
+	}
+}
+
+func TestFirstFailingLineNoMatch(t *testing.T) {
+	line := firstFailingLine([]byte("line 1\nline 2\n"), func(prefix []byte) bool {
+		return false
+	})
+
+	if line != 0 {
+		t.Errorf("expected line 0, got %d", line)
+	}
+}
+
 func TestFilepathToUrlpath(t *testing.T) {
 	tests := []struct {
 		input                 string
@@ -269,4 +546,20 @@ Quisque rhoncus elementum sapien ac semper. Sed tristique elit vel nibh semper t
 			b.Error(err)
 		}
 	}
+}
+
+func dataList(t *testing.T, data map[string]any, key string) []map[string]any {
+	t.Helper()
+
+	raw, ok := data[key]
+	if !ok {
+		t.Fatalf("expected data key %q in %v", key, data)
+	}
+
+	links, ok := raw.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected data key %q to be []map[string]any, got %T", key, raw)
+	}
+
+	return links
 }
