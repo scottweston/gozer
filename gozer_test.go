@@ -299,6 +299,17 @@ func TestConvertDjot(t *testing.T) {
 	}
 }
 
+func TestVersionInfoIncludesDjotTemplatingFeature(t *testing.T) {
+	output := versionInfo()
+
+	if !strings.Contains(output, "gozer ") {
+		t.Errorf("expected version output to include binary name, got %q", output)
+	}
+	if !strings.Contains(output, djotTemplatingFeature) {
+		t.Errorf("expected version output to include %q, got %q", djotTemplatingFeature, output)
+	}
+}
+
 func TestTemplateData(t *testing.T) {
 	oldTemplates := templates
 	defer func() {

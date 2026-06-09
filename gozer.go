@@ -28,6 +28,10 @@ var sitemapXSL []byte
 
 var now = time.Now()
 
+var version = "dev"
+
+const djotTemplatingFeature = "djot-content-templating"
+
 type Site struct {
 	Pages []Page
 	Posts []Page
@@ -487,10 +491,15 @@ func parseConfig(s *Site, file string) error {
 	return nil
 }
 
+func versionInfo() string {
+	return fmt.Sprintf("gozer %s\nfeatures: %s\n", version, djotTemplatingFeature)
+}
+
 func main() {
 	configFile := "config.toml"
 	rootPath := ""
 	showHelp := false
+	showVersion := false
 	listen := "localhost:8080"
 
 	// parse flags
@@ -500,8 +509,14 @@ func main() {
 	flag.StringVar(&rootPath, "r", rootPath, "")
 	flag.BoolVar(&showHelp, "help", showHelp, "")
 	flag.BoolVar(&showHelp, "h", showHelp, "")
+	flag.BoolVar(&showVersion, "version", showVersion, "")
 	flag.StringVar(&listen, "listen", "localhost:8080", "")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Print(versionInfo())
+		return
+	}
 
 	command := os.Args[len(os.Args)-1]
 	if showHelp || (command != "build" && command != "serve" && command != "new" && command != "watch") {
@@ -518,6 +533,7 @@ Commands:
 Options:
 	-r, --root <ROOT> Directory to use as root of project (default: .)
 	-c, --config <CONFIG> Path to configuration file (default: config.toml)
+	    --version Print version and build features
 	    --listen <INTERFACE:PORT> Interface to listen on; only used with 'serve',
 	             'INTERFACE' is optional. e.g. '--listen :9000 serve'
 `)
